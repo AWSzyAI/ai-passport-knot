@@ -11,8 +11,13 @@ import logging
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import threading
+import zlib
+import base64
 import time
 
 SERVICE = "6e410001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -23,6 +28,12 @@ DEFAULT_FOLDER = "Knot"           # ledger + 时间待核.md, inside the vault
 DEFAULT_DIARY = "YYYY-MM-DD"      # Obsidian's own default when Daily notes has no format
 DEFAULT_HEADING = "## Log"
 LOG = logging.getLogger("knot")
+KINDS = {"time", "start", "end", "voice"}
+TAGS = {"start": "#START", "end": "#END"}
+AUDIO_RATE = 16000
+MAX_AUDIO_BYTES = 480000          # 60 s of 4-bit IMA ADPCM at 16 kHz
+AUDIO_WINDOW = 48000              # bytes requested per aget
+DEFAULT_WHISPER = "mlx-community/whisper-large-v3-turbo"
 
 
 class ProtocolError(ValueError):
@@ -45,9 +56,15 @@ def validate_event(message):
              "seq": integer(message.get("seq"), 1, 2**32-2),
              "boot": integer(message.get("boot"), 1, 2**32-1),
              "mono_us": integer(message.get("mono_us"), 0, 2**53-1),
-             "utc_ms": message.get("utc_ms")}
+             "utc_ms": message.get("utc_ms"),
+             "kind": message.get("kind", "time")}
     if event["utc_ms"] is not None:
         integer(event["utc_ms"], 1704067200000, 4102444800000)
+    if event["kind"] not in KINDS:
+        raise ProtocolError("Unknown event kind")
+    if event["kind"] == "voice":
+        event["audio_bytes"] = integer(message.get("audio_bytes"), 0, MAX_AUDIO_BYTES)
+        event["audio_crc"] = integer(message.get("audio_crc"), 0, 2**32 - 1)
     return event
 
 
@@ -192,7 +209,8 @@ class Writer:
     'intent' is logged before the diary write and 'done' after it, so a crash in between is
     resolved by checking whether the line already exists.
     """
-    def __init__(self, vault, folder=DEFAULT_FOLDER, diary_format=None, heading=DEFAULT_HEADING, today=None):
+    def __init__(self, vault, folder=DEFAULT_FOLDER, diary_format=None, heading=DEFAULT_HEADING, today=None,
+                 attachments=None):
         self.vault = Path(vault).resolve()
         if not self.vault.is_dir():
             raise ValueError("Vault must already exist")
@@ -201,6 +219,7 @@ class Writer:
             raise ValueError("Output must be a subfolder inside the vault")
         self.diary_format = diary_format or detect_daily_notes(self.vault)
         self.heading = heading
+        self.attachments = attachments
         self.ledger = self.root / ".knot-ledger.tsv"
         self.today = today or (lambda: datetime.now(CHINA).date())
         self.waiting = set()
@@ -228,9 +247,18 @@ class Writer:
             handle.flush()
             os.fsync(handle.fileno())
 
-    def save(self, message):
-        """Return the ACK once durably written, or None to leave the event on the device."""
+    def is_done(self, message) -> bool:
         event = validate_event(message)
+        state = self._ledger().get(f"{event['device']}-{event['seq']:08x}")
+        return bool(state and state[0] == "done")
+
+    def save(self, message, text=None):
+        """Return the ACK once durably written, or None to leave the event on the device.
+        text: what follows the timestamp (voice transcript/embed); default is the kind's tag."""
+        event = validate_event(message)
+        if text is None:
+            text = TAGS.get(event["kind"], "")
+        extra = f"{text} " if text else ""
         identity = f"{event['device']}-{event['seq']:08x}"
         ack = {"type": "ack", "device": event["device"], "seq": event["seq"]}
         when = None if event["utc_ms"] is None else datetime.fromtimestamp(event["utc_ms"] / 1000, CHINA)
@@ -243,13 +271,13 @@ class Writer:
             return ack
         if when is None:
             target = self.root / "时间待核.md"
-            line = f"- 时间待核（设备 {event['device']} #{event['seq']}，第 {event['boot']} 次开机） "
+            line = f"- 时间待核（设备 {event['device']} #{event['seq']}，第 {event['boot']} 次开机） {extra}"
             if not target.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 replace_atomically(target, "# 时间待核的结绳记录\n\n设备当时未校时；按下的真实时间无法还原，需要手动回忆。\n\n")
         else:
             target = self.diary_path(when)
-            line = f"- {stamp} "
+            line = f"- {stamp} {extra}"
             if not target.exists():
                 if when.date() >= self.today():
                     if identity not in self.waiting:
@@ -260,7 +288,9 @@ class Writer:
                 replace_atomically(target, MINIMAL_DIARY.format(day=f"{when:%Y-%m-%d}", heading=self.heading))
         text = target.read_text(encoding="utf-8")
         if previous:  # crashed between intent and done: was the line already written?
-            written = sum(1 for l in text.splitlines() if l.rstrip() == line.rstrip() or l.startswith(line))
+            # Count lines for this second regardless of what the user appended after the stamp.
+            prefix = (line[:-len(extra)] if extra else line).rstrip() if when is None else f"- {stamp}"
+            written = sum(1 for l in text.splitlines() if l.startswith(prefix))
             done_same = sum(1 for k, (kind, st) in state.items() if kind == "done" and st == stamp)
             if written > done_same:
                 self._append_ledger("done", identity, stamp)
@@ -275,6 +305,165 @@ class Writer:
         self._append_ledger("done", identity, stamp)
         self.waiting.discard(identity)
         return ack
+
+
+ADPCM_STEPS = [
+    7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66,
+    73, 80, 88, 97, 107, 118, 130, 143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408,
+    449, 494, 544, 598, 658, 724, 796, 876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066,
+    2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358, 5894, 6484, 7132, 7845, 8630,
+    9493, 10442, 11487, 12635, 13899, 15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
+ADPCM_INDEX = [-1, -1, -1, -1, 2, 4, 6, 8]
+
+
+def adpcm_decode(data: bytes):
+    """IMA ADPCM, continuous mono stream, low nibble first; mirrors main/knot_adpcm.c."""
+    from array import array
+    out = array("h", bytes(4 * len(data)))
+    predictor, index, n = 0, 0, 0
+    steps, adjust = ADPCM_STEPS, ADPCM_INDEX
+    for byte in data:
+        for code in (byte & 0x0F, byte >> 4):
+            step = steps[index]
+            diff = step >> 3
+            if code & 4: diff += step
+            if code & 2: diff += step >> 1
+            if code & 1: diff += step >> 2
+            predictor = predictor - diff if code & 8 else predictor + diff
+            predictor = 32767 if predictor > 32767 else -32768 if predictor < -32768 else predictor
+            index += adjust[code & 7]
+            index = 0 if index < 0 else 88 if index > 88 else index
+            out[n] = predictor; n += 1
+    return out
+
+
+def write_wav(path: Path, pcm, rate=AUDIO_RATE):
+    import wave
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(rate)
+        handle.writeframes(pcm.tobytes())
+
+
+def attachment_folder(vault: Path, diary: Path, configured=None) -> Path:
+    """Obsidian's 'Default location for new attachments' (or an explicit override)."""
+    setting = configured
+    if setting is None:
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            setting = json.loads((vault / ".obsidian" / "app.json").read_text(encoding="utf-8")).get("attachmentFolderPath")
+    setting = (setting or "/").strip()
+    if setting in ("/", ""):
+        folder = vault
+    elif setting == "./" or setting.startswith("./"):
+        folder = diary.parent / setting[2:]
+    else:
+        folder = vault / setting
+    folder = folder.resolve()
+    if not folder.is_relative_to(vault):
+        raise ProtocolError("Attachment folder escapes the vault")
+    return folder
+
+
+HALLUCINATIONS = ("请不吝点赞", "点赞 订阅", "订阅 转发", "打赏支持", "明镜与点点", "字幕由", "Amara.org",
+                  "谢谢观看", "感谢观看", "字幕志愿者")
+
+
+def speech_seconds(audio, rate=AUDIO_RATE, frame_ms=30, margin_db=12.0, floor_abs=0.002):
+    """Seconds of frames at least margin_db above the noise floor (20th percentile frame level).
+    Key clicks are tens of milliseconds; speech is sustained."""
+    import numpy as np
+    n = rate * frame_ms // 1000
+    frames = len(audio) // n
+    if frames == 0:
+        return 0.0
+    levels = np.sqrt(np.mean(audio[:frames * n].reshape(frames, n) ** 2, axis=1))
+    floor = max(float(np.percentile(levels, 20)), floor_abs)
+    return float(np.count_nonzero(levels > floor * 10 ** (margin_db / 20))) * frame_ms / 1000
+
+
+def normalize_speech(audio, target_rms=0.08, min_speech_s=0.6, max_gain=30.0):
+    """Bring quiet recordings to a normal level; None if there is no sustained speech to hear."""
+    import numpy as np
+    if not len(audio) or speech_seconds(audio) < min_speech_s:
+        return None
+    rms = float(np.sqrt(np.mean(audio * audio)))
+    gain = min(max_gain, target_rms / rms)
+    return np.clip(audio * gain, -1.0, 1.0).astype(np.float32)
+
+
+def clean_segments(segments) -> str | None:
+    """Drop segments Whisper marks as non-speech and its known subtitle-credit hallucinations."""
+    kept = []
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        if seg.get("avg_logprob", 0) < -1.0:      # Whisper itself is guessing
+            continue
+        if seg.get("no_speech_prob", 0) > 0.6 and seg.get("avg_logprob", 0) < -0.5:
+            continue
+        if any(marker in text for marker in HALLUCINATIONS):
+            continue
+        kept.append(text)
+    return " ".join(kept).strip() or None
+
+
+class Transcriber:
+    """Local speech-to-text with mlx-whisper on Apple Silicon. Never required: returns None if unavailable."""
+    def __init__(self, model=DEFAULT_WHISPER):
+        self.model, self.failed, self.lock = model, False, threading.Lock()
+
+    def __call__(self, pcm):
+        if self.failed or not len(pcm):
+            return None
+        with self.lock:
+            try:
+                import numpy as np
+                import mlx_whisper
+                audio = np.frombuffer(pcm.tobytes(), dtype=np.int16).astype(np.float32) / 32768.0
+                audio = normalize_speech(audio)
+                if audio is None:
+                    return None  # near silence: Whisper would only hallucinate
+                result = mlx_whisper.transcribe(audio, path_or_hf_repo=self.model, language="zh",
+                                                initial_prompt="以下是普通话的句子，使用简体中文。",
+                                                condition_on_previous_text=False)
+                return clean_segments(result.get("segments", []))
+            except ImportError:
+                LOG.warning("未安装 mlx-whisper，录音不转写")
+                self.failed = True
+            except Exception as exc:  # model download, Metal, decode errors: keep the audio, skip text
+                LOG.warning("转写失败：%s", exc)
+            return None
+
+    def warm_up(self):
+        LOG.info("加载转写模型 %s（首次需下载约 1.6 GB）", self.model)
+        started = time.monotonic()
+        silence = __import__("array").array("h", bytes(AUDIO_RATE * 2))
+        self(silence)
+        if not self.failed:
+            LOG.info("转写模型已就绪，用时 %.0f 秒", time.monotonic() - started)
+
+
+def store_voice(writer, event, pcm, transcriber) -> str:
+    """Save the recording next to the vault's attachments and return the diary text for it."""
+    when = datetime.fromtimestamp(event["utc_ms"] / 1000, CHINA) if event["utc_ms"] else None
+    diary = writer.diary_path(when) if when else writer.root / "时间待核.md"
+    folder = attachment_folder(writer.vault, diary, writer.attachments)
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = f"knot-{when:%Y%m%d-%H%M%S}" if when else "knot-unknown"
+    stem += f"-{event['device'][-4:]}-{event['seq']}"
+    with tempfile.TemporaryDirectory() as tmp:
+        wav = Path(tmp) / f"{stem}.wav"
+        write_wav(wav, pcm)
+        target = folder / f"{stem}.m4a"
+        converted = sys.platform == "darwin" and subprocess.run(
+            ["afconvert", "-f", "m4af", "-d", "aac", "-b", "32000", str(wav), str(target)],
+            capture_output=True).returncode == 0
+        if not converted:
+            target = folder / f"{stem}.wav"
+            shutil.copyfile(wav, target)
+    text = transcriber(pcm) if transcriber else None
+    link = target.relative_to(writer.vault).as_posix()
+    return f"🎙 {text} ![[{link}]]" if text else f"🎙 ![[{link}]]"
 
 
 class InstanceLock:
@@ -397,9 +586,56 @@ async def ensure_paired_windows(device):
         ble.close()
 
 
-async def session(device, writer, expected_id=None):
+def chunk_for_mtu(mtu) -> int:
+    # Each audio line must fit one notification: ~58 bytes of JSON + base64(n) <= mtu - 3.
+    return max(48, min(180, ((int(mtu or 23) - 3 - 64) // 4) * 3))
+
+
+async def fetch_audio(send, incoming, failure, event, chunk):
+    """Pull a voice event's audio in windows; re-request gaps; verify CRC-32."""
+    total, seq = event["audio_bytes"], event["seq"]
+    data, covered = bytearray(total), bytearray(total)
+    offset, retries = 0, 0
+    while offset < total:
+        end = min(total, offset + AUDIO_WINDOW)
+        await send({"type": "aget", "seq": seq, "off": offset, "len": end - offset, "n": chunk})
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not failure.is_set():
+            try:
+                message = await asyncio.wait_for(incoming.get(), 0.5)
+            except asyncio.TimeoutError:
+                continue
+            kind = message.get("type")
+            if kind == "a" and message.get("seq") == seq:
+                start = integer(message.get("off"), 0, total)
+                try:
+                    piece = base64.b64decode(message.get("d", ""), validate=True)
+                except (ValueError, TypeError) as exc:
+                    raise ProtocolError("Bad audio chunk") from exc
+                if start + len(piece) > total:
+                    raise ProtocolError("Audio chunk out of range")
+                data[start:start + len(piece)] = piece
+                covered[start:start + len(piece)] = b"\x01" * len(piece)
+            elif kind == "aend" and message.get("seq") == seq:
+                break
+        if failure.is_set():
+            raise OSError("Disconnected during audio transfer")
+        gap = covered.find(0, offset, end)
+        if gap < 0:
+            offset, retries = end, 0
+        else:
+            retries += 1
+            if retries > 5:
+                raise TimeoutError("Audio transfer incomplete; device keeps the recording")
+            offset = gap
+    if zlib.crc32(data) != event["audio_crc"]:
+        raise ProtocolError("Audio CRC mismatch; device keeps the recording")
+    return bytes(data)
+
+
+async def session(device, writer, expected_id=None, transcriber=None):
     from bleak import BleakClient
-    incoming = asyncio.Queue(maxsize=128)
+    incoming = asyncio.Queue(maxsize=8192)  # audio arrives as thousands of short lines
     decoder = Decoder()
     failure = asyncio.Event()
 
@@ -458,7 +694,19 @@ async def session(device, writer, expected_id=None):
                 continue
             if message.get("device") != identity:
                 raise ProtocolError("Event identity changed")
-            ack = await asyncio.to_thread(writer.save, message)
+            event = validate_event(message)
+            if event["kind"] == "voice" and not await asyncio.to_thread(writer.is_done, message):
+                if event["audio_bytes"]:
+                    LOG.info("接收录音 #%s（%.0f 秒）", event["seq"], event["audio_bytes"] / (AUDIO_RATE / 2))
+                    audio = await fetch_audio(send, incoming, failure, event,
+                                              chunk_for_mtu(getattr(client, "mtu_size", 23)))
+                    pcm = adpcm_decode(audio)
+                    text = await asyncio.to_thread(store_voice, writer, event, pcm, transcriber)
+                else:
+                    text = "🎙（录音中断，没有音频）"
+                ack = await asyncio.to_thread(writer.save, message, text)
+            else:
+                ack = await asyncio.to_thread(writer.save, message)
             if ack is None:
                 continue  # not written; the device keeps it and retransmits
             await send(ack)
@@ -467,7 +715,10 @@ async def session(device, writer, expected_id=None):
 
 async def run(args):
     from bleak import BleakScanner
-    writer = Writer(args.vault, args.folder, args.diary_format, args.heading)
+    writer = Writer(args.vault, args.folder, args.diary_format, args.heading, attachments=args.attachments)
+    transcriber = Transcriber(args.whisper_model) if args.transcribe else None
+    if transcriber:  # download/load the model now, not while a recording waits
+        threading.Thread(target=transcriber.warm_up, daemon=True).start()
     retry = 1
     while True:
         try:
@@ -480,7 +731,8 @@ async def run(args):
             if not devices:
                 await asyncio.sleep(5)
                 continue
-            await session(devices[0], writer, args.device_id)
+            await session(devices[0], writer, args.device_id, transcriber)
+            LOG.info("设备已断开，重新扫描")
             retry = 1
         except (OSError, ProtocolError, TimeoutError) as exc:
             LOG.warning("%s；%s 秒后重试", exc, retry)
@@ -521,12 +773,16 @@ def parse_args(argv=None):
     parser.add_argument("--heading", help=f"section to insert into (default {DEFAULT_HEADING!r})")
     parser.add_argument("--address")
     parser.add_argument("--device-id")
+    parser.add_argument("--no-transcribe", action="store_true", help="keep voice memos as audio only")
     args = parser.parse_args(argv)
     config = load_config(args.config)
     for key, default in (("vault", None), ("folder", DEFAULT_FOLDER), ("diary_format", None),
                          ("heading", DEFAULT_HEADING), ("address", None), ("device_id", None)):
         if getattr(args, key) is None:
             setattr(args, key, config.get(key, default))
+    args.attachments = config.get("attachments")
+    args.whisper_model = config.get("whisper_model", DEFAULT_WHISPER)
+    args.transcribe = bool(config.get("transcribe", True)) and not args.no_transcribe
     if not args.vault:
         parser.error(f"no vault: pass --vault or set \"vault\" in {args.config or config_path()}")
     return args
@@ -535,6 +791,9 @@ def parse_args(argv=None):
 def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    for noisy in ("httpx", "huggingface_hub", "filelock"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     with InstanceLock(args.vault):
         try:
             asyncio.run(run(args))

@@ -4,8 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
-typedef struct { char key[16]; unsigned char bytes[80]; size_t size; int blob; } item_t;
+typedef struct { char key[16]; unsigned char bytes[96]; size_t size; int blob; } item_t;
 static item_t durable[1024], staged[1024];
 static int fail_commit;
 struct iterator { int index; };
@@ -35,7 +36,7 @@ esp_err_t nvs_get_blob(nvs_handle_t h,const char*k,void*v,size_t*s) {
     *s=staged[i].size;memcpy(v,staged[i].bytes,*s);return ESP_OK;
 }
 esp_err_t nvs_set_blob(nvs_handle_t h,const char*k,const void*v,size_t s) {
-    (void)h;int i=locate(k,1);assert(i>=0 && s<=80);
+    (void)h;int i=locate(k,1);assert(i>=0 && s<=96);
     memcpy(staged[i].bytes,v,s);staged[i].size=s;staged[i].blob=1;return ESP_OK;
 }
 esp_err_t nvs_commit(nvs_handle_t h) {
@@ -66,9 +67,9 @@ int main(void) {
     assert(knot_store_init(&boot)==ESP_OK && boot==2);
     assert(knot_store_first(&second)==ESP_OK && second.seq==first.seq && second.utc_ms==read.utc_ms);
     knot_history_t h[KNOT_HISTORY];
-    assert(knot_store_history(h,KNOT_HISTORY)==1 && h[0].seq==first.seq && !h[0].synced && h[0].utc_ms==read.utc_ms);
+    assert(knot_store_history(h,KNOT_HISTORY)==1 && h[0].seq==first.seq && !KNOT_HISTORY_SYNCED(&h[0]) && h[0].utc_ms==read.utc_ms);
     assert(knot_store_ack(first.seq)==ESP_OK && knot_store_count()==0);
-    assert(knot_store_history(h,KNOT_HISTORY)==1 && h[0].synced); /* green after ACK */
+    assert(knot_store_history(h,KNOT_HISTORY)==1 && KNOT_HISTORY_SYNCED(&h[0])); /* green after ACK */
     assert(knot_store_add(2000000,&second)==ESP_OK && !second.utc_ms);
     assert(knot_store_init(&boot)==ESP_OK && boot==3);
     assert(knot_store_sync(5000000,1794844900000LL)==ESP_OK);
@@ -92,14 +93,31 @@ int main(void) {
     fail_commit=2; /* 1st commit = erase (ok), 2nd = history update (lost) */
     assert(knot_store_ack(read.seq)==ESP_OK);
     assert(knot_store_init(&boot)==ESP_OK);
-    assert(knot_store_history(h,1)==1 && h[0].seq==read.seq && h[0].synced);
+    assert(knot_store_history(h,1)==1 && h[0].seq==read.seq && KNOT_HISTORY_SYNCED(&h[0]));
+    /* Kinds, voice finishing, scan, and v1 upgrade of an old stored blob. */
+    assert(knot_store_add_kind(8,KNOT_KIND_START,KNOT_NO_SLOT,&read)==ESP_OK && read.flags==KNOT_FLAG_AUDIO_DONE);
+    assert(knot_store_history(h,1)==1 && KNOT_HISTORY_KIND(&h[0])==KNOT_KIND_START);
+    assert(knot_store_ack(read.seq)==ESP_OK);
+    assert(knot_store_add_kind(9,KNOT_KIND_VOICE,4,&read)==ESP_OK && read.audio_slot==4 && !read.flags);
+    assert(knot_store_finish_audio(read.seq,1234,0xabcd)==ESP_OK);
+    assert(knot_store_init(&boot)==ESP_OK);
+    knot_event_t voice; assert(knot_store_first(&voice)==ESP_OK);
+    assert(voice.kind==KNOT_KIND_VOICE && voice.audio_bytes==1234 && voice.audio_crc==0xabcd && (voice.flags&KNOT_FLAG_AUDIO_DONE));
+    assert(knot_store_ack(voice.seq)==ESP_OK);
+    { knot_event_v1_t old={.version=1,.seq=voice.seq+1,.boot=1,.mono_us=3,.utc_ms=1794844800000LL};
+      old.crc=knot_crc(&old,offsetof(knot_event_v1_t,crc));
+      char k[16]; snprintf(k,16,"e%08x",voice.seq+1); /* simulate a record written by firmware v1 */
+      nvs_set_u32(1,"next",voice.seq+2); nvs_set_blob(1,k,&old,sizeof(old)); nvs_commit(1);
+      assert(knot_store_init(&boot)==ESP_OK && knot_store_count()==1);
+      assert(knot_store_first(&read)==ESP_OK && read.version==2 && read.seq==old.seq && read.kind==KNOT_KIND_TIME);
+      assert(knot_store_ack(read.seq)==ESP_OK); }
     for(unsigned i=0;i<512;i++) assert(knot_store_add(i,&read)==ESP_OK);
     assert(knot_store_add(999,&read)==ESP_ERR_NO_MEM);
     assert(knot_store_count()==512);
     /* History survives reboot, newest first, capped, pending shown as unsynced. */
     assert(knot_store_init(&boot)==ESP_OK);
     unsigned n=knot_store_history(h,KNOT_HISTORY);
-    assert(n==KNOT_HISTORY && h[0].seq==read.seq && !h[0].synced);
+    assert(n==KNOT_HISTORY && h[0].seq==read.seq && !KNOT_HISTORY_SYNCED(&h[0]));
     for(unsigned i=1;i<n;i++) assert(h[i].seq==h[i-1].seq-1);
     assert(knot_store_history(h,5)==5);
     puts("knot_store: PASS (reboot, clock anchors, lost ACK, failed commits, full queue, history)");

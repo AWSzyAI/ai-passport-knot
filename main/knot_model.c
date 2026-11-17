@@ -1,23 +1,35 @@
 #include "knot_model.h"
 #include <stddef.h>
+#include <string.h>
 
-uint32_t knot_crc(const void *data, unsigned length) {
+uint32_t knot_crc_update(uint32_t crc, const void *data, unsigned length) {
     const unsigned char *p = data;
-    uint32_t crc = 0xffffffffU;
     for (unsigned i = 0; i < length; ++i) {
         crc ^= p[i];
         for (int bit = 0; bit < 8; ++bit)
             crc = (crc >> 1) ^ (0xedb88320U & (0U - (crc & 1U)));
     }
-    return ~crc;
+    return crc;
+}
+uint32_t knot_crc(const void *data, unsigned length) {
+    return ~knot_crc_update(0xffffffffU, data, length);
 }
 void knot_seal(knot_event_t *event) {
     event->crc = knot_crc(event, offsetof(knot_event_t, crc));
 }
 bool knot_valid(const knot_event_t *event) {
-    return event->version == 1 && event->seq != 0 && event->boot != 0 &&
+    return event->version == 2 && event->kind <= KNOT_KIND_VOICE && event->seq != 0 && event->boot != 0 &&
         event->mono_us <= INT64_MAX && event->utc_ms >= 0 &&
         event->crc == knot_crc(event, offsetof(knot_event_t, crc));
+}
+bool knot_upgrade_v1(const knot_event_v1_t *old, knot_event_t *event) {
+    if (old->version != 1 || old->crc != knot_crc(old, offsetof(knot_event_v1_t, crc))) return false;
+    memset(event, 0, sizeof(*event));
+    event->version = 2; event->seq = old->seq; event->boot = old->boot;
+    event->kind = KNOT_KIND_TIME; event->audio_slot = KNOT_NO_SLOT;
+    event->mono_us = old->mono_us; event->utc_ms = old->utc_ms;
+    knot_seal(event);
+    return knot_valid(event);
 }
 bool knot_resolve(knot_event_t *event, const knot_anchor_t *anchor) {
     if (event->utc_ms != 0) return true;

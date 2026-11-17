@@ -10,8 +10,14 @@ cd "$WORK"
 uv venv -q -p 3.11 .venv
 uv pip install -q -p .venv/bin/python -r "$RECEIVER/requirements.txt" pyinstaller
 cat > KnotReceiver.spec <<SPEC
-from PyInstaller.utils.hooks import collect_submodules
-a = Analysis(["knot_app.py"], hiddenimports=collect_submodules("bleak.backends.corebluetooth"))
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+datas, binaries, hidden = [], [], collect_submodules("bleak.backends.corebluetooth")
+for package in ("mlx", "mlx_whisper", "tiktoken", "tiktoken_ext"):
+    d, b, h = collect_all(package); datas += d; binaries += b; hidden += h
+# torch is only used by mlx_whisper's model-conversion script, never for transcription.
+hidden = [m for m in hidden if m != "mlx_whisper.torch_whisper"]
+a = Analysis(["knot_app.py"], datas=datas, binaries=binaries, hiddenimports=hidden,
+             excludes=["torch", "mlx_whisper.torch_whisper", "tkinter", "matplotlib", "IPython"])
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KnotReceiver", console=False)
 coll = COLLECT(exe, a.binaries, a.datas, name="KnotReceiver")

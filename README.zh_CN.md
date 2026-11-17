@@ -9,7 +9,8 @@
 ## Log
 - 10:40 到达工位
 - 2026-11-17 10:53:54 
-- 2026-11-17 11:49:03 
+- 2026-11-17 11:49:03 #START 
+- 2026-11-17 15:50:50 🎙 试试语音识别的效果 ![[a/knot-20261117-155050-cdfe-42.m4a]] 
 ```
 
 离线按下的记录先存在设备里，连上后按原来的时间补传。每一步都是「先可靠保存，再确认」：电脑确认写进日记后
@@ -17,10 +18,19 @@
 
 ## 设备
 
-- **确定键**：记下当前这一秒。
-- **上 / 下**：整页翻看屏幕上的历史（最近 32 条，新的在前）。绿色已同步到电脑，黄色还在设备里等待。
-  黑屏时第一下只点亮屏幕。
-- 30 秒无操作关背光。电源键是硬件开关，固件感知不到。
+| 按键 | 记录模式（默认） | 浏览模式 |
+| --- | --- | --- |
+| 短按 OK | 记下这一秒 | 记下这一秒 |
+| 长按 OK | 记下这一秒并开始录音（再按 OK 停止，最长 60 秒） | 同左 |
+| 短按 UP | 记下这一秒并加 `#START` | 上一页 |
+| 短按 DOWN | 记下这一秒并加 `#END` | 下一页 |
+| 长按 UP / DOWN | 进入浏览模式 | 回到记录模式 |
+
+短按长按在松手时判定，但时间取按下那一刻。屏幕列出最近 32 条记录，按日期分组（绿色已同步，黄色还在设备里）。
+30 秒无操作关背光并回到记录模式。电源键是硬件开关，固件感知不到。
+
+录音：16 kHz 单声道、4 位 IMA ADPCM，存在 4.5 MiB 的 `audio` 分区（9 段 × 60 秒）。时间记录之后上传，校验 CRC，
+以 `.m4a` 存进库的附件文件夹，并用 Whisper（`mlx-whisper`，Apple Silicon）在本机转写。静音、低置信度片段和字幕套话幻觉会被丢弃，音频始终保留。
 
 ### 刷固件
 
@@ -58,18 +68,18 @@ uv pip install --python .venv/Scripts/python.exe -r receiver/requirements.txt
 - 设备从没校过时就断电的记录，无法确定时间，写进 `<folder>/时间待核.md`，不编造日期。
 - 去重账本：`<folder>/.knot-ledger.tsv`（默认文件夹 `Knot`）。
 
-配置项（JSON，除 `vault` 外都可省略）：`vault`、`folder`、`diary_format`（moment 格式，如 `[Journal]/YYYY/MM/YYYY-MM-DD`）、`heading`、`address`。
+配置项（JSON，除 `vault` 外都可省略）：`vault`、`folder`、`diary_format`（moment 格式，如 `[Journal]/YYYY/MM/YYYY-MM-DD`）、`heading`、`address`、`attachments`（默认用 Obsidian 的附件文件夹）、`transcribe`（默认开）、`whisper_model`（默认 `mlx-community/whisper-large-v3-turbo`，首次启动下载约 1.6 GB）。
 
 ## 实现
 
 | 层 | 技术 |
 | --- | --- |
 | 固件 | ESP-IDF 5.5.3、NimBLE、LVGL、官方 AI Passport BSP |
-| 存储 | 256 KiB NVS 分区 `knots`（`0x7c0000`），最多 512 条待传 + 32 条历史 |
+| 存储 | 256 KiB NVS 分区 `knots`（`0x7c0000`，512 条待传 + 32 条历史）；4.5 MiB `audio` 分区（`0x310000`） |
 | 时间 | 微秒单调计时 + 电脑下发的锚点（三次蓝牙往返取最快一次的中点），每小时重校 |
 | 链路 | 蓝牙服务 `6e410001-b5a3-f393-e0a9-e50e24dcca9e`，LE Secure Connections + 防中间人，设备显示 PIN，绑定 |
-| 协议 | 每行一条 JSON：`hello` → `ping/pong` ×3 → `sync/synced` → `event` → 按编号 `ack` |
-| 接收端 | Python 3.11 + Bleak 3（CoreBluetooth / WinRT），原子写文件，intent/done 账本 |
+| 协议 | 每行一条 JSON：`hello` → `ping/pong` ×3 → `sync/synced` → `event` →（录音：`aget` → `a`… → `aend`）→ 按编号 `ack` |
+| 接收端 | Python 3.11 + Bleak 3（CoreBluetooth / WinRT），原子写文件，intent/done 账本，mlx-whisper |
 | macOS App | PyInstaller 打包，带蓝牙用途说明；launchd `RunAtLoad` + `KeepAlive` |
 
 精度：时间源是电脑系统时间，加上半个蓝牙往返（约 30 毫秒），所以秒级可信，不保证亚秒。某次开机还没校时就关机，那次的记录无法确定时间。

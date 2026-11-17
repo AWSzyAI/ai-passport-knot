@@ -23,17 +23,19 @@ static void put_history(const knot_history_t *entry) {
 static void touch_history(uint32_t seq, int synced, int64_t utc_ms) {
     knot_history_t entry = history[seq % KNOT_HISTORY];
     if (entry.seq != seq) return;
-    if (synced >= 0) entry.synced = (uint32_t)synced;
+    if (synced >= 0) entry.flags = (entry.flags & ~1U) | (synced ? 1U : 0U);
     if (utc_ms) entry.utc_ms = utc_ms;
     put_history(&entry);
 }
 /* One worker owns all calls. Errors are never repaired by erasing user data. */
 static esp_err_t read_event(const char *name, knot_event_t *event) {
-    size_t size = sizeof(*event);
-    esp_err_t err = nvs_get_blob(db, name, event, &size);
-    if (err == ESP_OK && (size != sizeof(*event) || !knot_valid(event)))
-        return ESP_ERR_INVALID_CRC;
-    return err;
+    union { knot_event_t v2; knot_event_v1_t v1; } raw;
+    size_t size = sizeof(raw);
+    esp_err_t err = nvs_get_blob(db, name, &raw, &size);
+    if (err != ESP_OK) return err;
+    if (size == sizeof(knot_event_t) && knot_valid(&raw.v2)) { *event = raw.v2; return ESP_OK; }
+    if (size == sizeof(knot_event_v1_t) && knot_upgrade_v1(&raw.v1, event)) return ESP_OK;
+    return ESP_ERR_INVALID_CRC;
 }
 static esp_err_t put_event(knot_event_t *event) {
     char name[16]; key(name, 'e', event->seq); knot_seal(event);
@@ -79,7 +81,7 @@ esp_err_t knot_store_init(uint32_t *boot) {
         if (nvs_get_blob(db, name, &entry, &size) != ESP_OK || size != sizeof(entry) ||
             !entry.seq || entry.seq % KNOT_HISTORY != slot || entry.seq >= next_seq) continue;
         history[slot] = entry;
-        if (!entry.synced) {
+        if (!KNOT_HISTORY_SYNCED(&entry)) {
             /* ACK committed but history update lost: the event is gone, so it was synced. */
             char event_name[16]; key(event_name, 'e', entry.seq);
             knot_event_t event;
@@ -92,6 +94,10 @@ esp_err_t knot_store_init(uint32_t *boot) {
     return err;
 }
 esp_err_t knot_store_add(uint64_t mono_us, knot_event_t *event) {
+    return knot_store_add_kind(mono_us, KNOT_KIND_TIME, KNOT_NO_SLOT, event);
+}
+esp_err_t knot_store_add_kind(uint64_t mono_us, uint8_t kind, uint8_t audio_slot, knot_event_t *event) {
+    if (kind > KNOT_KIND_VOICE) return ESP_ERR_INVALID_STATE;
     if (count >= MAX_EVENTS || next_seq == UINT32_MAX) return ESP_ERR_NO_MEM;
     uint32_t seq = next_seq;
     /* Reserve first: a crash can leave a gap but can never reuse an ID. */
@@ -100,13 +106,15 @@ esp_err_t knot_store_add(uint64_t mono_us, knot_event_t *event) {
     if (err != ESP_OK) return err;
     next_seq = seq + 1;
     memset(event, 0, sizeof(*event));
-    event->version = 1; event->seq = seq; event->boot = boot_id;
+    event->version = 2; event->seq = seq; event->boot = boot_id;
+    event->kind = kind; event->audio_slot = kind == KNOT_KIND_VOICE ? audio_slot : KNOT_NO_SLOT;
+    event->flags = kind == KNOT_KIND_VOICE ? 0U : KNOT_FLAG_AUDIO_DONE;
     event->mono_us = mono_us;
     (void)knot_resolve(event, &anchor);
     err = put_event(event);
     if (err == ESP_OK) {
         ++count;
-        knot_history_t entry = { .seq = seq, .synced = 0, .utc_ms = event->utc_ms };
+        knot_history_t entry = { .seq = seq, .flags = (uint32_t)kind << 8, .utc_ms = event->utc_ms };
         put_history(&entry);
     }
     return err;
@@ -164,6 +172,31 @@ esp_err_t knot_store_ack(uint32_t seq) {
     return err;
 }
 unsigned knot_store_count(void) { return count; }
+esp_err_t knot_store_finish_audio(uint32_t seq, uint32_t bytes, uint32_t crc) {
+    char name[16]; key(name, 'e', seq);
+    knot_event_t event;
+    esp_err_t err = read_event(name, &event);
+    if (err != ESP_OK) return err;
+    if (event.kind != KNOT_KIND_VOICE) return ESP_ERR_INVALID_STATE;
+    event.audio_bytes = bytes; event.audio_crc = crc; event.flags |= KNOT_FLAG_AUDIO_DONE;
+    return put_event(&event);
+}
+esp_err_t knot_store_scan(void (*visit)(const knot_event_t *event, void *context), void *context) {
+    nvs_iterator_t it = NULL;
+    esp_err_t err = nvs_entry_find("knots", "events", NVS_TYPE_BLOB, &it);
+    while (err == ESP_OK) {
+        nvs_entry_info_t info; nvs_entry_info(it, &info);
+        if (info.key[0] == 'e') {
+            knot_event_t event;
+            esp_err_t read = read_event(info.key, &event);
+            if (read != ESP_OK) { nvs_release_iterator(it); return read; }
+            visit(&event, context);
+        }
+        err = nvs_entry_next(&it);
+    }
+    nvs_release_iterator(it);
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_OK : err;
+}
 unsigned knot_store_history(knot_history_t *out, unsigned max) {
     unsigned n = 0;
     for (uint32_t seq = next_seq; seq-- > 1 && n < max && next_seq - seq <= KNOT_HISTORY;) {

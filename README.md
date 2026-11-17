@@ -10,7 +10,8 @@ Obsidian daily note as a bullet you can write after later:
 ## Log
 - 10:40 arrived at the lab
 - 2026-11-17 10:53:54 
-- 2026-11-17 11:49:03 
+- 2026-11-17 11:49:03 #START 
+- 2026-11-17 15:50:50 🎙 testing voice recognition ![[attachments/knot-20261117-155050-cdfe-42.m4a]] 
 ```
 
 Offline presses are kept on the device and uploaded later with their original time. Every step
@@ -20,11 +21,23 @@ lost or doubled one.
 
 ## Device
 
-- **OK**: record the current second.
-- **UP / DOWN**: page through the on-screen history (32 most recent presses, newest first).
-  Green = synced to the computer, yellow = still waiting on the device. On a dark screen the first
-  press only wakes it.
-- Backlight turns off after 30 s. The power button is a hardware switch the firmware cannot see.
+| Key | Record mode (default) | Browse mode |
+| --- | --- | --- |
+| OK | record this second | record this second |
+| hold OK | record this second + voice memo (OK again stops, 60 s max) | same |
+| UP | record this second with `#START` | previous page |
+| DOWN | record this second with `#END` | next page |
+| hold UP / DOWN | enter browse mode | back to record mode |
+
+The time is taken at key-down even though short/long is decided on release. The screen lists the
+32 most recent presses grouped by date (green = synced, yellow = still on the device). 30 s idle
+turns the backlight off and returns to record mode. The power button is a hardware switch the
+firmware cannot see.
+
+Voice memos: 16 kHz mono, 4-bit IMA ADPCM, stored in a 4.5 MiB `audio` partition (9 × 60 s slots).
+They upload after the event's timestamp, CRC-checked, are saved as `.m4a` in the vault's attachment
+folder, and transcribed locally with Whisper (`mlx-whisper`, Apple Silicon). Silence and Whisper's
+low-confidence / subtitle-credit hallucinations are dropped; the audio is always kept.
 
 ### Flash the firmware
 
@@ -72,18 +85,20 @@ only, which the firmware rejects). No startup task is installed.
 - De-duplication ledger: `<folder>/.knot-ledger.tsv` (default folder `Knot`).
 
 Config keys (JSON, all optional except `vault`): `vault`, `folder`, `diary_format`
-(moment pattern, e.g. `[Journal]/YYYY/MM/YYYY-MM-DD`), `heading`, `address`.
+(moment pattern, e.g. `[Journal]/YYYY/MM/YYYY-MM-DD`), `heading`, `address`, `attachments`
+(default: Obsidian's attachment folder), `transcribe` (default true), `whisper_model`
+(default `mlx-community/whisper-large-v3-turbo`, ~1.6 GB downloaded on first start).
 
 ## How it works
 
 | Layer | Stack |
 | --- | --- |
 | Firmware | ESP-IDF 5.5.3, NimBLE, LVGL, official AI Passport BSP |
-| Storage | 256 KiB NVS partition `knots` @ `0x7c0000`, up to 512 pending events + 32-entry history |
+| Storage | 256 KiB NVS partition `knots` @ `0x7c0000` (512 pending events + 32-entry history); 4.5 MiB `audio` partition @ `0x310000` |
 | Time | microsecond monotonic clock + anchor from the computer (3 BLE ping round trips, lowest-latency midpoint); re-synced hourly |
 | Link | BLE service `6e410001-b5a3-f393-e0a9-e50e24dcca9e`, LE Secure Connections + MITM, passkey shown on device, bonded |
-| Protocol | newline-delimited JSON: `hello` → `ping/pong` ×3 → `sync/synced` → `event` → `ack` (per ID) |
-| Receiver | Python 3.11 + Bleak 3 (CoreBluetooth / WinRT); atomic file writes; intent/done ledger |
+| Protocol | newline-delimited JSON: `hello` → `ping/pong` ×3 → `sync/synced` → `event` → (`aget` → `a`… → `aend` for voice) → `ack` (per ID) |
+| Receiver | Python 3.11 + Bleak 3 (CoreBluetooth / WinRT); atomic file writes; intent/done ledger; mlx-whisper |
 | macOS app | PyInstaller bundle with `NSBluetoothAlwaysUsageDescription`, LaunchAgent `RunAtLoad` + `KeepAlive` |
 
 Accuracy: the clock source is the computer's system time plus half a BLE round trip (~30 ms), so
