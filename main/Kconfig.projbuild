@@ -1,0 +1,6 @@
+menu "Knot notes"
+config KNOT_RECORD_BUTTON
+    int "Record button: 0 UP, 1 DOWN, 2 OK"
+    range 0 2
+    default 2
+endmenu

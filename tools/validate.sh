@@ -20,6 +20,7 @@ run_static_checks() {
     fi
 
     python3 tools/check_repo.py
+    bash tools/test_knot.sh
 
     actionlint_bin="${ACTIONLINT_BIN:-}"
     if [[ -z "${actionlint_bin}" ]]; then
