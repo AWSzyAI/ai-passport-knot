@@ -682,7 +682,7 @@ async def session(device, writer, expected_id=None, transcriber=None):
         if expected_id and identity != expected_id:
             raise ProtocolError("Connected device does not match selected identity")
         await sync_clock(send, receive)
-        LOG.info("已连接 %s，待传 %s 条", identity, hello.get("pending"))
+        LOG.info("已连接 %s（设备第 %s 次开机），待传 %s 条", identity, hello.get("boot"), hello.get("pending"))
         # Reconnect hourly to renew the clock with the same handshake.
         deadline = time.monotonic() + 3600
         while client.is_connected and not failure.is_set() and time.monotonic() < deadline:
@@ -713,6 +713,29 @@ async def session(device, writer, expected_id=None, transcriber=None):
             LOG.info("已写入 #%s；已确认本机保存，iCloud 状态未知", message["seq"])
 
 
+_MAC_MANAGER = None
+
+
+async def connected_devices_macos():
+    """Devices macOS already holds a link to. A bonded peripheral is reconnected by the OS itself and
+    then stops advertising, so scanning alone never finds it again; ask CoreBluetooth directly."""
+    global _MAC_MANAGER
+    if sys.platform != "darwin":
+        return []
+    try:
+        from CoreBluetooth import CBUUID
+        from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
+        from bleak.backends.device import BLEDevice
+    except ImportError:
+        return []
+    if _MAC_MANAGER is None:
+        _MAC_MANAGER = CentralManagerDelegate()
+        await _MAC_MANAGER.wait_until_ready()
+    peripherals = _MAC_MANAGER.central_manager.retrieveConnectedPeripheralsWithServices_(
+        [CBUUID.UUIDWithString_(SERVICE)]) or []
+    return [BLEDevice(str(p.identifier().UUIDString()), p.name(), (p, _MAC_MANAGER)) for p in peripherals]
+
+
 async def run(args):
     from bleak import BleakScanner
     writer = Writer(args.vault, args.folder, args.diary_format, args.heading, attachments=args.attachments)
@@ -726,6 +749,11 @@ async def run(args):
             found = await BleakScanner.discover(timeout=5, service_uuids=[SERVICE])
             devices = [d for d in found if (d.name or "").startswith("Knot-") and
                        (not args.address or d.address.casefold() == args.address.casefold())]
+            if not devices:
+                held = [d for d in await connected_devices_macos() if (d.name or "").startswith("Knot-")]
+                if held:
+                    LOG.info("设备已由系统连接（不再广播），直接接管")
+                    devices = held
             if len(devices) > 1:
                 raise ProtocolError("Multiple devices: use --address to select one")
             if not devices:
