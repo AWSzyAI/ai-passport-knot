@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knot · 按一下，记下这一秒</title>
+<style>
+  :root { --paper: #f4ecdd; --rope: #0a3161; --fresh: #22a35a; --moss: #1e4d3b; }
+  body { margin: 0; background: var(--paper); color: var(--rope); font: 17px/1.65 ui-rounded, "SF Pro Rounded", "PingFang SC", system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 64px 24px 80px; }
+  img.icon { width: 96px; height: 96px; border-radius: 22px; box-shadow: 0 8px 24px rgba(10,49,97,.15); }
+  h1 { font-size: 44px; line-height: 1.1; margin: 22px 0 10px; }
+  .lede { margin: 0 0 36px; color: rgba(10,49,97,.78); }
+  .card { padding: 22px 0; border-top: 1px solid rgba(10,49,97,.12); }
+  .card:last-of-type { border-bottom: 1px solid rgba(10,49,97,.12); }
+  h2 { font-size: 20px; margin: 0 0 4px; }
+  .card p { margin: 0 0 12px; color: rgba(10,49,97,.78); }
+  .btn { display: inline-block; font-weight: 600; color: var(--paper); background: var(--rope); border-radius: 999px; padding: 12px 24px; text-decoration: none; }
+  .btn:focus-visible { outline: 3px solid var(--fresh); outline-offset: 3px; }
+  .soon { color: var(--moss); font-weight: 600; }
+  footer { margin-top: 36px; font-size: 14px; color: #8a8f96; }
+  footer a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <img class="icon" src="icon.png" alt="Knot 图标：一根绳上打着三个结">
+  <h1>Knot</h1>
+  <p class="lede">按一下 FoloToy AI Passport 卡片，记下这一秒；iPhone 碰一下卡片，记录就写进 Obsidian 当天的日记，之后慢慢补写。</p>
+
+  <section class="card">
+    <h2>1. 装 iPhone App</h2>
+    <p>通过 TestFlight 安装。先在 App Store 装好 TestFlight，再点下面的链接。</p>
+    <a class="btn" href="https://testflight.apple.com/join/vSAu2dpc">在 TestFlight 中安装</a>
+  </section>
+  <section class="card">
+    <h2>2. 给卡片刷固件</h2>
+    <p>用电脑上的 Chrome 或 Edge，插线点一下就装好。</p>
+    <a class="btn" href="flash/">打开刷机页</a>
+  </section>
+  <section class="card">
+    <h2>3. 打开 App，跟着教程走</h2>
+    <p>第一次打开会教你卡片上每个键怎么用，最后选好你的 Obsidian 库。</p>
+  </section>
+
+  <footer>
+    <p><a href="privacy/">隐私说明</a>：不收集任何数据。<a href="https://github.com/AWSzyAI/ai-passport-knot">源码在 GitHub</a>，基于 FoloToy AI Passport 开源项目（MIT）。</p>
+  </footer>
+</main>
+</body>
+</html>

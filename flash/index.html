@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>给卡片刷入 Knot</title>
+<script type="module" src="https://unpkg.com/esp-web-tools@10.5.2/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --paper: #f4ecdd; --rope: #0a3161; --fresh: #22a35a; --moss: #1e4d3b; --muted: #8a8f96;
+    --line: rgba(10, 49, 97, .12);
+    --round: ui-rounded, "SF Pro Rounded", "PingFang SC", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--paper); color: var(--rope); font: 17px/1.65 var(--round); }
+  main { max-width: 640px; margin: 0 auto; padding: 56px 24px 80px; }
+  h1 { font-size: 40px; line-height: 1.15; margin: 0 0 12px; letter-spacing: -.01em; }
+  .lede { margin: 0 0 36px; color: rgba(10, 49, 97, .75); }
+  /* the cord: steps hang off one vertical line, like the app's timeline */
+  ol { list-style: none; margin: 0; padding: 0 0 0 34px; position: relative; }
+  ol::before { content: ""; position: absolute; left: 11px; top: 10px; bottom: 10px; width: 4px; border-radius: 2px; background: var(--rope); }
+  li { position: relative; padding: 0 0 28px; }
+  li::before { content: ""; position: absolute; left: -31px; top: 6px; width: 16px; height: 16px; border-radius: 50%;
+               border: 4px solid var(--rope); background: var(--paper); }
+  li.go::before { border-color: var(--fresh); }
+  li h2 { font-size: 19px; margin: 0 0 4px; }
+  li p { margin: 0; color: rgba(10, 49, 97, .78); }
+  .install { margin: 14px 0 6px; }
+  esp-web-install-button button[slot="activate"], .btn {
+    font: 600 17px var(--round); color: var(--paper); background: var(--rope); border: 0; border-radius: 999px;
+    padding: 13px 26px; cursor: pointer;
+  }
+  esp-web-install-button button[slot="activate"]:focus-visible, .btn:focus-visible { outline: 3px solid var(--fresh); outline-offset: 3px; }
+  .note { font-size: 15px; color: var(--moss); margin-top: 8px; }
+  .warn { display: none; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; margin: 0 0 28px; }
+  esp-web-install-button[install-unsupported] ~ .warn, .warn.show { display: block; }
+  details { border-top: 1px solid var(--line); padding: 14px 0; }
+  details:last-of-type { border-bottom: 1px solid var(--line); }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { margin: 8px 0 0; color: rgba(10, 49, 97, .78); }
+  code { font: 15px ui-monospace, SFMono-Regular, Menlo, monospace; background: rgba(10, 49, 97, .06); padding: 1px 5px; border-radius: 5px; }
+  footer { margin-top: 40px; font-size: 14px; color: var(--muted); }
+  a { color: var(--rope); }
+  @media (max-width: 480px) { h1 { font-size: 32px; } main { padding-top: 36px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>给卡片刷入 Knot</h1>
+  <p class="lede">用电脑上的 Chrome 或 Edge，插一根 USB 线，点一下按钮就装好。整个过程大约一分钟，不用装任何软件。</p>
+
+  <p class="warn" id="unsupported">这个浏览器不能直接连 USB 设备。请在电脑上用 <strong>Chrome</strong> 或 <strong>Edge</strong> 打开这一页；手机、Safari 和 Firefox 都不行。</p>
+
+  <ol>
+    <li>
+      <h2>开机</h2>
+      <p>按住卡片侧面的电源键约半秒，屏幕亮起。没电的话先充十来分钟。卡片关机时电脑认不到它。</p>
+    </li>
+    <li>
+      <h2>插线</h2>
+      <p>用能传数据的 USB‑C 线连到电脑。只能充电的线不行。</p>
+    </li>
+    <li class="go">
+      <h2>安装</h2>
+      <p>点下面的按钮，在弹出的列表里选 <code>USB JTAG/serial debug unit</code>，再点「连接」。</p>
+      <div class="install">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">安装 Knot <span data-version></span></button>
+          <span slot="unsupported"></span>
+          <span slot="not-allowed">请用 https 打开这一页。</span>
+        </esp-web-install-button>
+      </div>
+      <p class="note">第一次从官方固件换成 Knot：勾选「清除设备」。以后升级：不要勾，配对和还没同步的记录都会保留。</p>
+    </li>
+    <li>
+      <h2>回到手机</h2>
+      <p>卡片重启后屏幕显示 KNOT。打开 iPhone 上的 Knot App 点「同步」，第一次会请你输入卡片屏幕上的 6 位数字完成配对。</p>
+    </li>
+  </ol>
+
+  <details>
+    <summary>列表里找不到设备</summary>
+    <p>确认卡片已经开机、屏幕是亮的；换一根数据线或换一个 USB 口；关掉其他可能占用串口的程序（比如 Arduino、串口助手）后重试。</p>
+  </details>
+  <details>
+    <summary>装完卡片显示 Storage error</summary>
+    <p>卡片里留着旧固件的数据。重新安装一次并勾选「清除设备」。</p>
+  </details>
+  <details>
+    <summary>勾了「清除设备」以后手机连不上</summary>
+    <p>清除会删掉卡片里的配对信息。在 iPhone「设置 › 蓝牙」里找到 Knot‑xxxxxx，点 ⓘ 选「忽略此设备」，再回 Knot App 同步并输入新的 6 位数字。</p>
+  </details>
+  <details>
+    <summary>想用命令行刷</summary>
+    <p>下载 <a href="https://github.com/AWSzyAI/ai-passport-knot/releases/latest">最新的固件</a>，执行 <code>esptool.py --chip esp32c3 write_flash 0x0 knot-firmware-*-full.bin</code>。这样会清掉配对。</p>
+  </details>
+
+  <footer>
+    <p>当前固件 <span data-version>—</span>。源码在 <a href="https://github.com/AWSzyAI/ai-passport-knot">GitHub</a>，基于 FoloToy AI Passport 开源项目（MIT）。</p>
+  </footer>
+</main>
+<script>
+  fetch("manifest.json").then(r => r.json()).then(m => {
+    document.querySelectorAll("[data-version]").forEach(el => { el.textContent = m.version; });
+  }).catch(() => {});
+  if (!("serial" in navigator)) document.getElementById("unsupported").classList.add("show");
+</script>
+</body>
+</html>
